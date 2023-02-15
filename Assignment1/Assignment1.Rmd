@@ -1,0 +1,535 @@
+---
+title: "Assignment1"
+author: "Huilin Niu"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_depth: '2'
+bibliography: A1ref.bib
+csl: biomed-central.csl
+---
+
+# Install and load packages
+
+**Install packages if required**
+
+```{r Install packages, message=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)){
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("GEOmetadb", quietly = TRUE)){
+  BiocManager::install("GEOmetadb")}
+
+if (!requireNamespace("knitr", quietly = TRUE)){
+  install.packages("knitr")}
+
+if (!requireNamespace("edgeR", quietly = TRUE)){
+  install.packages("edgeR")}
+
+if (!requireNamespace("readxl", quietly = TRUE)){
+  BiocManager::install("readxl")}
+
+if (!requireNamespace("RColorBrewer", quietly = TRUE)){
+  install.packages("RColorBrewer")}
+
+if (!requireNamespace("biomaRt", quietly = TRUE)){
+  install.packages("biomaRt")}
+```
+
+@r
+@BiocManager
+@geometadb
+@knitr
+@edgeR
+@readxl
+@colorbrewer
+@BioMart
+
+**Load Packages**
+
+```{r, message=FALSE}
+library("GEOmetadb")
+library("knitr")
+library("edgeR")
+library("readxl")
+library("RColorBrewer")
+library("biomaRt")
+```
+
+# Data Exploration
+
+## Get GEO description of my dataset
+
+```{r, message=FALSE}
+gse <- getGEO("GSE179448",GSEMatrix=FALSE)
+kable(data.frame(head(Meta(gse))), format = "html")
+```
+
+## Information about Platform (GPL18573)
+
+```{r Platform Information, message=FALSE}
+current_gpl <- names(GPLList(gse))[1]
+current_gpl_info <- Meta(getGEO(current_gpl))
+```
+
+@GEO
+@galvan2021
+**Platform title:** `r current_gpl_info$title`<br /> **Submission data:**`r current_gpl_info$submission_date` <br /> **Last Update data:** `r current_gpl_info$last_update_date` <br /> **Organism:** `r current_gpl_info$organism` <br /> **Number of GEO datasets using this technology:** `r length(current_gpl_info$series_id)` <br /> **Number of GEO samples that use this technology:**`r length(current_gpl_info$sample_id)`<br />
+
+## Get the Expression Data
+
+```{r Get data file, message=FALSE}
+sfiles = getGEOSuppFiles('GSE179448')
+fnames = rownames(sfiles)
+fnames
+```
+
+<br /> There are two supplementary files, the first one is a gene count table file, the second is the metadata of RNA seq(This will be used later to define groups). Here, I chose the first one with the count data.
+
+```{r Check data format, paged.print=TRUE}
+# Get count data if we we have not already downloaded.
+file_dowloaded <- "texp.rds"
+if (file.exists(file_dowloaded)) {
+  texp <- readRDS(file_dowloaded)
+} else {
+  texp = read.delim(fnames[1],header=TRUE, check.names = FALSE)
+  saveRDS(texp, file_dowloaded)
+}
+kable(texp[1:15,1:10], format = "html")
+```
+
+<br /> The first column of the data is the gene symbols, and the other columns are the sampleIDs(The details about sampleIDs will be explained later).
+
+# Clean the data
+
+```{r Check dimention of dataset}
+dim(texp)
+```
+
+The result shows that there are 56120 genes in this table which is not realistic,so we definitely need to clean this data.
+
+## Define the groups
+
+```{r Show column names of texp}
+colnames(texp)
+```
+
+The column names is formatted in xxx.yyy.zzz format(for example: RR0947025.020520.TC#1). From reading the second supplementary file, xxx represents the donor ID, yyy represents the processing batch, and zzz represents the cell type. TR represents T regulatory cells that downregulate the immune response, whereas Tconv represents the conventional T cells that will differentiate into effector cells during immune response.
+
+```{r}
+# To extract all sample names from column names
+samples <- data.frame(lapply(colnames(texp)[2:87], 
+        FUN=function(x){unlist(strsplit(x, 
+                        split = "\\."))}))
+
+#format the texp_filtered with new row names for better representations in plot
+#The new row names are only missing the processing batch.
+samplenames <- paste0(samples[1,], samples[3,])
+colnames(texp) <- c("gene_symbol", samplenames)
+
+# Read the second supplementary file from the GSE and get donor type information
+donor_dowloaded <- "tmeta.rds"
+if (file.exists(donor_dowloaded)) {
+  tmeta <- readRDS(donor_dowloaded)
+} else {
+  tmeta = read_xlsx(fnames[2], col_names = TRUE, skip = 1)
+  saveRDS(tmeta, donor_dowloaded)
+}
+
+# Assign donor_type value
+donor_type <- lapply(samples[1,], 
+                     FUN=function(x){
+                       tmeta$Severity[which(tmeta$`Donor ID` == x)]})
+
+samples[nrow(samples)+1,] <- donor_type
+
+# Assign group(donor type + cell type)
+all_type <- paste0(samples[4,], samples[3,])
+samples[nrow(samples)+1,] <- all_type
+
+# Assign rownames and colnames 
+colnames(samples) <- colnames(texp)[2:87]
+rownames(samples) <- c("patients","batch","cell_type", "donor_type", "all_type")
+samples <- data.frame(t(samples))
+kable(samples[1:10,1:5], format = "html")
+```
+
+This table shows the sample groups. We can see there are four different types of donors: healthy, recovered, mild outpatient, and hospitalized moderate to severe. There are two different T cells being sequneced: Treg(TR) and Tconv(TC). <br /> **Question1: What are the control and test conditions of the dataset?** <br /> There are two different ways we can look at the dataset. First, we can compare the expression of Treg/Tcov across the donor groups, for exmaple, expression of Treg in healthy people versus hospitalized patients. In this case, the control is going to be the healthy donors, and the test conditions are the other three groups: Recovered, Mild Outpatient, and Hospitalized moderate to severe. Second, we can compare the expression of Treg to Tconv in one specific donor group, for example, compare the expression of Treg to Tconv in only the hospitalized patients. In this case, the control is the Tconv expression, and the tested condition is the Tconv expression level. <br /> **Question2: Why us the dataset of interest to you?** <br /> This dataset is related to COVID immune respnose. I have heard about results saying how immune response and T cells activity is different during the cytokine storm in patients, but I have never dealt with datasets explaining this. This dataset gave me a handson activity to look at how they come to the conclusion and what we learn from the RNASeq data from different T cells. <br />
+
+# Find duplicated genes
+
+```{r Search for duplicated genes}
+summarized_gene_counts_transcripts <- sort(table(texp$gene_symbol),
+                               decreasing = TRUE)
+kable(table(texp$gene_symbol)[1:5], format="html")
+```
+
+The table here shows no duplicated gene symbols are found(I have a hypothesis why this happened, and will be explained in Question 3 in "Identifier Mapping" section).
+
+# Filter low counts genes
+
+I chose to use EdgeR here because I wanted to explore the differences in gene differential expression analysis using two different method. Previous method comparason has shown that DeepSeq package seems to be better as it can identify more genes. However, as mentioned in class, if the normalization methods are so similar, what leads to this difference? Am I still going to be able to identify the differentially expressed genes using a different package?
+
+```{r Filter low counts}
+#translate out counts into counts per million using the edgeR package function cpm
+cpms = cpm(texp[,2:87])
+rownames(cpms) <- texp[,1]
+
+#filter out low counts
+keep10 = rowSums(cpms >1) >= 10
+keep43 = rowSums(cpms >1) >= 43
+texp_filtered10 = texp[keep10,]
+texp_filtered = texp[keep43,]
+
+#check dataset dimension again
+dim(texp)
+dim(texp_filtered)
+```
+
+<br /> **Questio3: How many outliers are removed?** <br /> From filter out low counts genes, we have removed about two thrid(39466 outliers) of the genes in the dataset to remove outliers. This step was optimized multiple times. My original filtering chose `keep = rowSums(cpms >1) >= 10` which is too relaxed considering the number of samples I have(43 for each cell types). Therefore, Dr. Isserlin suggested a more stringent filtering, and I decided to use 43 as the filtering threshold. This means that the gene has to have a cpm greater than 1 and exists in at least 43 samples. This helped with cleaning up the data to give it a better distribution(comparison in next section).
+
+# Normalization
+
+## Distribution of data - Boxplot
+
+```{r Box Plot before optimization, message=FALSE, warning=FALSE}
+data2plot10 <- log2(cpm(texp_filtered10[,2:87]))
+boxplot(data2plot10, xlab = "", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.8,
+        cex.axis = 0.5, main = "Treg/Tconv RNASeq Samples before Optimization"
+        )
+title(xlab = "Samples", line = 4, cex.lab = 0.8)
+#draw the median on each box plot
+abline(h = median(apply(data2plot10, 2, median)), 
+       col = "green", lwd = 0.8, lty = "dashed")
+
+```
+
+```{r Box Plot after optimization, echo=FALSE, message=FALSE, warning=FALSE}
+data2plot <- log2(cpm(texp_filtered[,2:87]))
+boxplot(data2plot, xlab = "", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.8,
+        cex.axis = 0.5, main = "Treg/Tconv RNASeq Samples after optimization"
+        )
+title(xlab = "Samples", line = 4, cex.lab = 0.8)
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)), 
+       col = "green", lwd = 0.8, lty = "dashed")
+
+```
+
+If we compare the box plot before and after normalization, the median of the log2CPM value increased suggesting more low counts have been filtered out.
+
+## Distribution of our data - Density plot
+
+We can also compare the density plot before and after optimization.
+
+```{r Density plot before optimization, echo=TRUE}
+counts_density <- apply(log2(cpm(texp_filtered[,2:87])), 
+                        2, density)
+  #calculate the limits across all the samples
+    xlim <- 0; ylim <- 0
+    for (i in 1:length(counts_density)) {
+      xlim <- range(c(xlim, counts_density[[i]]$x)); 
+      ylim <- range(c(ylim, counts_density[[i]]$y))
+    }
+    cols <- rainbow(length(counts_density))
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+         ylab="Smoothing density of log2-CPM", 
+         main="Density Plot of Treg/Tconv RNASeq Samples Before Optimization", cex.lab = 0.75)
+    #plot each line
+    for (i in 1:length(counts_density)) 
+      lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+    #create legend
+    legend("topright", colnames(data2plot),  
+           col=cols, lty=ltys, cex=0.35, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90",
+           ncol = 3)
+
+```
+
+```{r Density plot after optimization, echo=FALSE}
+counts_density <- apply(log2(cpm(texp_filtered[,2:87])), 
+                        2, density)
+  #calculate the limits across all the samples
+    xlim <- 0; ylim <- 0
+    for (i in 1:length(counts_density)) {
+      xlim <- range(c(xlim, counts_density[[i]]$x)); 
+      ylim <- range(c(ylim, counts_density[[i]]$y))
+    }
+    cols <- rainbow(length(counts_density))
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+         ylab="Smoothing density of log2-CPM", 
+         main="Density Plot of Treg/Tconv RNASeq Samples after Optimization", cex.lab = 0.75)
+    #plot each line
+    for (i in 1:length(counts_density)) 
+      lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+    #create legend
+    legend("topright", colnames(data2plot),  
+           col=cols, lty=ltys, cex=0.35, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90",
+           ncol = 3)
+
+```
+
+As you can see in the before vs after optimization, the first spike became smaller which indicates the dataset is more clean after teh optimization. However, the data is not perfect here as it still has the first spike meaning the distribution of data does not centered.
+
+# Applying TMM to our dataset
+
+## M vs A plot
+
+```{r MA plot}
+plotMA(log2(texp_filtered[,c(2,21)]), ylab="M - ratio log expression", 
+       main="Treg Healthy vs Hospitalized Patient")
+```
+
+This is an example of an MA plot showing the expression of Treg in a Healthy person vs a hospitalized patient with moderate to severe symptoms. Each dot represent a gene. We can see some gene have a pretty big fold change in expression level as the dots shown in the upper and lower left of the plot. The average log-expression of genes are mostly around 5, and a big percentage of genes are concentrated in the centre. We will then normalize the data, and try to remove the more dispeased points in the plot.
+
+## Create an edgeR container
+
+```{r Create edgeR container}
+#Change the texp_filtered into a matrix
+filtered_data_matrix <- as.matrix(texp_filtered[,2:87])
+rownames(filtered_data_matrix) <- texp_filtered$gene_symbol
+d = DGEList(counts=filtered_data_matrix, group=samples$all_type)
+d = calcNormFactors(d)
+normalized_counts <- cpm(d)
+```
+
+## How did normalization change the data?
+
+### Box Plot
+
+```{r box plot before normalization, echo=FALSE, warning=FALSE}
+data2plot <- log2(cpm(texp_filtered[,2:87]))
+boxplot(data2plot, xlab = "", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.8,
+        cex.axis = 0.5, main = "Treg/Tconv RNASeq Samples before Normalization"
+        )
+title(xlab = "Samples", line = 4, cex.lab = 0.8)
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)), 
+       col = "green", lwd = 0.8, lty = "dashed")
+```
+
+```{r boxplot after normalizaiton, warning=FALSE}
+data2plot <- log2(normalized_counts)
+boxplot(data2plot, xlab = "", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.8,
+        cex.axis = 0.5, main = "Treg/Tconv RNASeq Samples after Normalization"
+        )
+title(xlab = "Samples", line = 4, cex.lab = 0.8)
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)), 
+       col = "green", lwd = 0.8, lty = "dashed")
+```
+
+If you compare the boxplot before and after normalization, we can see that the log2CPM and median of log2CPM does not really show any changes. However, if you look at the green dashline, the median of each sample/replicates became more aligned. \### Density Plot
+
+```{r Density plot before normalization, echo=FALSE}
+counts_density <- apply(log2(cpm(texp_filtered[,2:87])), 
+                        2, density)
+  #calculate the limits across all the samples
+    xlim <- 0; ylim <- 0
+    for (i in 1:length(counts_density)) {
+      xlim <- range(c(xlim, counts_density[[i]]$x)); 
+      ylim <- range(c(ylim, counts_density[[i]]$y))
+    }
+    cols <- rainbow(length(counts_density))
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+         ylab="Smoothing density of log2-CPM", 
+         main="Density Plot of Treg/Tconv RNASeq Samples before normalization", cex.lab = 0.75)
+    #plot each line
+    for (i in 1:length(counts_density)) 
+      lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+    #create legend
+    legend("topright", colnames(data2plot),  
+           col=cols, lty=ltys, cex=0.35, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90",
+           ncol = 3)
+
+```
+
+```{r Density plot after normalization}
+counts_density <- apply(log2(normalized_counts), 
+                        2, density)
+  #calculate the limits across all the samples
+    xlim <- 0; ylim <- 0
+    for (i in 1:length(counts_density)) {
+      xlim <- range(c(xlim, counts_density[[i]]$x)); 
+      ylim <- range(c(ylim, counts_density[[i]]$y))
+    }
+    cols <- rainbow(length(counts_density))
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+         ylab="Smoothing density of log2-CPM", 
+         main="Density Plot of Treg/Tconv RNASeq Samples after Normalization", cex.lab = 0.75)
+    #plot each line
+    for (i in 1:length(counts_density)) 
+      lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+    #create legend
+    legend("topright", colnames(data2plot),  
+           col=cols, lty=ltys, cex=0.35, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90",
+           ncol = 3)
+
+```
+
+If you compare the density plot before and after normalization, you can see the N and bandwidth of course does not change. The lines representing each sample became more compact which means they align better while the distribution of data remains the same.
+
+<br /> **Question4: How did you handle replicates?** <br /> There are 86 samples in this dataset. Replicates are handled by removing lower counts from the dataset and normalization of the data. Removing the outliers helps remove the noises and non-informative outputs. Normalization of data helps to reduve biological and technical variances. <br /> \## MDS plot
+
+```{r MDSplot}
+par(mar = c(8, 4, 2, 2), xpd = TRUE)
+plotMDS(d, col = brewer.pal(8,"Paired")[factor(samples$all_type)], pch = 19,
+        main = "MDS plot for Treg/Tconv RNASeq Samples")
+
+#create legend
+legend("bottom", legend = levels(d$samples$group),
+       c=brewer.pal(8,"Paired"), cex=0.7, inset = c(0, -0.57),
+       pch = 19, ncol = 2)
+```
+
+From the MDS plot, we can see the distances between different groups. Here, each group have a main color, and each cell type have a light or darker color. For exmaple, Tconv cells RNASeq in healthy donors are represented in light blue and Treg cells RNASeq are represented in darker blue. This is easier for visualization and pairwise comparison. As you can see, all TC samples cluster on the right half of the graph and all TR samples cluster on the left half of the cell. If you take a closer look at each donor groups, you can see that data points in one group tends to be in closer vicinity than the data times in two groups. However, the mild outpatients samples seem to be right in the middle of other samples. \# Dispersion
+
+## Calculate dispersion
+
+```{r Calculate dispersion using model}
+model_design <- model.matrix(~samples$patients
+                             + samples$cell_type+0)
+d_cell <- estimateDisp(d, model_design)
+
+```
+
+# BCV plot
+
+```{r BCV plot}
+plotBCV(d_cell,col.tagwise = "black",col.common = "red",
+        main= "BCV plot for Treg/Tconv RNASeq Samples")
+```
+
+Each dot represents the biological coefficient variation. Genes with low counts will have higher variance as shown by the trend line. The variation seen here can come from either biological or technical source in a RNASeq experiment. \# Mean-variance relationship plot
+
+```{r mvr plot}
+plotMeanVar(d_cell, show.raw.vars = TRUE,
+            show.tagwise.vars=TRUE,
+            NBline=TRUE, show.ave.raw.vars = TRUE,
+            show.binned.common.disp.vars = TRUE,
+            main = "Mean-variance Plot for Treg/Tconv RNASeq Samples")
+```
+
+The mean-variance plot creates a visual representation of mean-variance relationship. The grey dots are the raw vars, the blue represents the tagwise/genewise vaes, the darker red line(avg of raw vars) is covered by the red line(the binned common dispersion vars), and lastly the NBline is shown in blue. \# Identifier mapping
+
+```{r connect to ensmbl}
+ensembl <- useMart("ensembl", version = "Ensembl Genes 109")
+ensembl_93 <- useMart("ensembl", 
+                       host = "https://jul2018.archive.ensembl.org",
+                       version = "Ensembl Genes 93")
+
+ensembl = useDataset("hsapiens_gene_ensembl",mart=ensembl)
+ensembl_93 = useDataset("hsapiens_gene_ensembl",mart=ensembl_93)
+
+```
+
+```{r Find filters related to hgnc gene symbols}
+biomart_human_filters <- listFilters(ensembl)
+kable(biomart_human_filters[
+  grep(biomart_human_filters$name,pattern="hgnc"),],
+      format="html")
+```
+
+Because out datasets used HGNC gene symbols(names) as the identifier, we will select this(78 hgnc_symbol) as the filter.
+
+```{r Try to map to hgnc symbols}
+conversion_stash_cur <- "gene_conversion_cur.rds"
+if (file.exists(conversion_stash_cur)) {
+  gene_conversion_cur <- readRDS(conversion_stash_cur)
+} else {
+  gene_conversion_cur <- biomaRt::getBM(attributes =c("hgnc_symbol", 
+                                                  "hgnc_symbol"),
+                                    filters = c("hgnc_symbol"),
+                                    values = texp_filtered$gene_symbol,
+                                    mart= ensembl)
+  saveRDS(gene_conversion_cur, conversion_stash_cur)
+}
+
+colnames(gene_conversion_cur) <- c("Merge", "Hugo_Symbol")
+normalized_counts_annot <-merge(gene_conversion_cur, normalized_counts, 
+                                by.x = "Merge", 
+                                by.y = "row.names", all.y = TRUE)
+normalized_counts_annot[which(is.na(normalized_counts_annot$Hugo_Symbol)), ]
+
+```
+
+<br /> **Question5: Were there expression values that were not unique for specific genes?** <br /> As the table shown above, using the most current version of ensembl, there are 2560 expression cannot be mapped to the current version of genes. Because this dataset is published in July 2021, but the data preparation started way brefore this, and I think they might have used older versions of ensembl mart. Therefore, I ran the following code and identified that 400 more expressions can be mapped from a older version.
+
+```{r Check differences betqween new and old}
+conversion_stash_old <- "gene_conversion_old.rds"
+if (file.exists(conversion_stash_old)) {
+  gene_conversion_old <- readRDS(conversion_stash_old)
+} else {
+  gene_conversion_old <- biomaRt::getBM(attributes =c("hgnc_symbol", 
+                                                  "hgnc_symbol"),
+                                    filters = c("hgnc_symbol"),
+                                    values = texp_filtered$gene_symbol,
+                                    mart= ensembl_93)
+  saveRDS(gene_conversion_old, conversion_stash_old)
+}
+length(which(rownames(normalized_counts) %in% gene_conversion_cur$hgnc_symbol))
+length(which(rownames(normalized_counts) %in% gene_conversion_old$hgnc_symbol))
+```
+
+```{r  Identifier mapping using old version}
+colnames(gene_conversion_old) <- c("Merge", "Hugo_Symbol")
+normalized_counts_annot_old <-merge(gene_conversion_old, normalized_counts, 
+                                by.x = "Merge", 
+                                by.y = "row.names", all.y = TRUE)
+normalized_counts_annot_old[which(is.na(normalized_counts_annot_old$Hugo_Symbol)), ]
+```
+
+As you can see from the table, the first two genes are mapped to previous HGNC symbols. <br /> **Question6: Were there expression values that were not unique for specific genes? How did you handle this?** <br /> I think the authors already tried to clean the data and the data I am using now is a result of they already tried to mapped all identifiers to HGNC symbols.Therefore, no duplicated genes are found in the dataset.
+
+```{r}
+all_outputs <- c(gene_conversion_cur[,1], 
+              gene_conversion_old[,1])
+
+new_genes <- data.frame(unique(all_outputs), unique(all_outputs))
+
+colnames(new_genes) <- c("Merge", "Hugo_Symbol")
+normalized_counts_annot_all <-merge(new_genes, normalized_counts, 
+                                by.x = "Merge", 
+                                by.y = "row.names", all.y = TRUE)
+
+expr_not_mapped <- normalized_counts_annot_all[which(is.na(normalized_counts_annot_all$Hugo_Symbol)), ]
+nrow(expr_not_mapped)
+```
+
+There are a total of 2154 expression data not mapped.
+
+```{r}
+cleaned_expr <- normalized_counts_annot_all[which(!is.na(normalized_counts_annot$Hugo_Symbol)), ]
+new_rownames <- cleaned_expr[,1]
+cleaned_expr <- cleaned_expr[,c(-1,-2)]
+rownames(cleaned_expr) <- new_rownames
+kable(cleaned_expr[1:20, 1:10], format("html"))
+```
+
+As shown in this table, we have produced a cleaned dataset with HGNC symbols are row names. <br /> **Question7: What is the final coverage of your dataset?** <br /> We have 14500 genes left excluding the ones are not being mapped 2154 expression. They make up the 16654 genes after removing low counts.
+
+# References
