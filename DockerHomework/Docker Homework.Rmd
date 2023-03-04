@@ -1,0 +1,38 @@
+---
+title: "DockerHomework"
+author: "Huilin Niu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# Install and load required packages
+```{r}
+
+if (!requireNamespace("knitr", quietly = TRUE)){
+  install.packages("knitr")
+}
+
+library("knitr")
+```
+
+# Create a 5 by 10 matrix of random integers
+```{r randomIntegers}
+ranInt<-matrix(sample.int(100,
+                           size=50,
+                           replace=TRUE),
+               nrow=5,ncol=10)
+
+colnames(ranInt) <- c("cond1", "cond2", "cond3", "cond 4", "cond5",
+                      "ctrl1", "ctrl2", "ctrl3", "ctrl4", "ctrl5")
+rownames(ranInt) <- c("gene1", "gene2", "gene3", "gene4", "gene5")
+
+knitr::kable(ranInt, "simple")
+```
+
+# Compute fold change for each gene
+
+```{r}
+foldChange <- log2(rowMeans(ranInt[, 1:5]) 
+                   / rowMeans(ranInt[, 6:10]))
+knitr::kable(foldChange, "simple", col.names = "Fold Change")
+```
+
